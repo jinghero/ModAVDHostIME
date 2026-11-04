@@ -108,6 +108,49 @@ jobs:
             }
           }
 
+      - name: Verify issue 83 fallback against v1.0.0
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'issue83-release'
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          $release = Join-Path $dir 'release.apk'
+          Invoke-WebRequest 'https://github.com/ModAVD/ModAVDHostIME/releases/download/v1.0.0/modavd-ime.apk' -OutFile $release
+          $expected = ((Get-Content -LiteralPath 'release/1.0.0.SHA256SUMS.txt' -Raw) -split '\s+')[0]
+          if ((Get-FileHash -LiteralPath $release -Algorithm SHA256).Hash -ne $expected) { throw 'Released APK checksum mismatch' }
+          $pass = Join-Path $dir 'temporary.pass'
+          $ks = Join-Path $dir 'temporary.p12'
+          Set-Content -LiteralPath $pass -Value 'temporary-ci-password' -NoNewline -Encoding ascii
+          & (Join-Path $env:JAVA_HOME 'bin/keytool.exe') -genkeypair -noprompt -keystore $ks -storetype PKCS12 -alias ci -keyalg RSA -keysize 4096 -validity 1 -dname 'CN=Temporary CI' -storepass:file $pass -keypass:file $pass
+          if ($LASTEXITCODE -ne 0) { throw 'keytool failed' }
+          $signer = Join-Path $env:ANDROID_HOME 'build-tools/36.1.0/apksigner.bat'
+          $built = Join-Path $dir 'temporary-signed.apk'
+          & $signer sign --ks $ks --ks-type PKCS12 --ks-key-alias ci --ks-pass "file:$pass" --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled true --v4-signing-enabled false --out $built 'out/obj/ime/aligned.apk'
+          if ($LASTEXITCODE -ne 0) { throw 'apksigner sign failed' }
+          python -B -I -X utf8 scripts/verify_release_apk.py --built-apk $built --release-apk $release --apksigner $signer --certificate-sha256 d18cca3c1982149349f164d28e02490b2eb694e44d56834fa02a1062eb42e823
+          if ($LASTEXITCODE -ne 0) { throw 'Release provenance mismatch' }
+          @'
+          import hashlib, json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          import verify_release_apk as verify
+          root = Path(os.environ['RUNNER_TEMP']) / 'issue83-release'
+          built = (root / 'temporary-signed.apk').read_bytes()
+          release = (root / 'release.apk').read_bytes()
+          expected = Path('release/1.0.0.SHA256SUMS.txt').read_text().split()[0]
+          verify.compare_apks(built, release)
+          lb, lr = verify.parse_layout(built), verify.parse_layout(release)
+          assert lb == lr
+          assert built[:lb.block_start] == release[:lr.block_start]
+          assert built[lb.block_end:] == release[lr.block_end:]
+          restored = built[:lb.block_start] + release[lr.block_start:lr.block_end] + built[lb.block_end:]
+          assert restored == release
+          assert hashlib.sha256(restored).hexdigest() == expected
+          print(json.dumps({'missing_preinstalled_sdk': True, 'all_bytes_outside_signature_equal': True, 'signature_offset': lb.block_start, 'signature_length': lb.block_end - lb.block_start, 'original_signature_restored_equals_release': True, 'sha256': expected, 'note': 'Reused published signature block; not independently signed with the formal key.'}))
+          '@ | python -B -I -X utf8 -
+          if ($LASTEXITCODE -ne 0) { throw 'Full byte/checksum reproduction failed' }
+
+
   privacy:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
