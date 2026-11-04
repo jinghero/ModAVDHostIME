@@ -62,6 +62,14 @@ jobs:
         run: |
           pwsh -NoProfile -File .\scripts\test_android_sdk_fallback.ps1
           if ($LASTEXITCODE -ne 0) { throw 'SDK fallback tests failed' }
+      - name: Hide preinstalled platform for issue 83 validation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $jar = Join-Path $env:ANDROID_HOME 'platforms\android-36\android.jar'
+          if (Test-Path -LiteralPath $jar) { Rename-Item -LiteralPath $jar -NewName 'android.jar.issue83-backup' }
+          if (Test-Path -LiteralPath $jar) { throw 'Expected missing preinstalled android.jar' }
+          Write-Host 'Verified missing preinstalled android.jar; next step must download Android 36 r2.'
       - name: Check android.jar and build APKs
         shell: pwsh
         env:
